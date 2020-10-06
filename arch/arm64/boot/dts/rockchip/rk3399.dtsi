@@ -2196,8 +2196,8 @@
 					<3 25 RK_FUNC_1 &pcfg_pull_none>,
 					<3 26 RK_FUNC_1 &pcfg_pull_none>,
 					<3 27 RK_FUNC_1 &pcfg_pull_none>,
-					<3 31 RK_FUNC_1 &pcfg_pull_none>,
-					<4 0 RK_FUNC_1 &pcfg_pull_none>;
+					<3 31 RK_FUNC_1 &pcfg_pull_none>;
+//					<4 0 RK_FUNC_1 &pcfg_pull_none>;
 			};
 
 			i2s0_8ch_bus: i2s0-8ch-bus {
@@ -2209,8 +2209,8 @@
 					<3 28 RK_FUNC_1 &pcfg_pull_none>,
 					<3 29 RK_FUNC_1 &pcfg_pull_none>,
 					<3 30 RK_FUNC_1 &pcfg_pull_none>,
-					<3 31 RK_FUNC_1 &pcfg_pull_none>,
-					<4 0 RK_FUNC_1 &pcfg_pull_none>;
+					<3 31 RK_FUNC_1 &pcfg_pull_none>;
+//					<4 0 RK_FUNC_1 &pcfg_pull_none>;
 			};
 		};
 
