@@ -96,6 +96,7 @@ static inline void device_set_wakeup_path(struct device *dev)
 /* drivers/base/power/wakeup.c */
 extern void wakeup_source_prepare(struct wakeup_source *ws, const char *name);
 extern struct wakeup_source *wakeup_source_create(const char *name);
+extern void wakeup_source_drop(struct wakeup_source *ws);
 extern void wakeup_source_destroy(struct wakeup_source *ws);
 extern void wakeup_source_add(struct wakeup_source *ws);
 extern void wakeup_source_remove(struct wakeup_source *ws);
@@ -132,6 +133,8 @@ static inline struct wakeup_source *wakeup_source_create(const char *name)
 {
 	return NULL;
 }
+
+static inline void wakeup_source_drop(struct wakeup_source *ws) {}
 
 static inline void wakeup_source_destroy(struct wakeup_source *ws) {}
 
@@ -215,5 +218,12 @@ static inline void pm_wakeup_hard_event(struct device *dev)
 {
 	return pm_wakeup_dev_event(dev, 0, true);
 }
+
+static inline void wakeup_source_trash(struct wakeup_source *ws)
+{
+        wakeup_source_remove(ws);
+        wakeup_source_drop(ws);
+}
+
 
 #endif /* _LINUX_PM_WAKEUP_H */
