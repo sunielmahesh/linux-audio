@@ -97,6 +97,10 @@
 #define ES8316_TEST2		0x52
 #define ES8316_TEST3		0x53
 
+#define ES8316_IFACE		ES8316_SERDATA1
+#define ES8316_ADC_IFACE	ES8316_SERDATA_ADC
+#define ES8316_DAC_IFACE	ES8316_SERDATA_DAC
+
 /*
  * Field definitions
  */
@@ -132,5 +136,48 @@
 /* ES8316_GPIO_FLAG */
 #define ES8316_GPIO_FLAG_GM_NOT_SHORTED		0x02
 #define ES8316_GPIO_FLAG_HP_NOT_INSERTED	0x04
+
+/* REGISTER 0X01 CLOCK MANAGER */
+#define ES8316_CLKMGR_MCLK_DIV_MASK     (0X1<<7)
+#define ES8316_CLKMGR_MCLK_DIV_NML      (0X0<<7)
+#define ES8316_CLKMGR_MCLK_DIV_1        (0X1<<7)
+#define ES8316_CLKMGR_ADC_MCLK_MASK     (0X1<<3)
+#define ES8316_CLKMGR_ADC_MCLK_EN       (0X1<<3)
+#define ES8316_CLKMGR_ADC_MCLK_DIS      (0X0<<3)
+#define ES8316_CLKMGR_DAC_MCLK_MASK     (0X1<<2)
+#define ES8316_CLKMGR_DAC_MCLK_EN       (0X1<<2)
+#define ES8316_CLKMGR_DAC_MCLK_DIS      (0X0<<2)
+#define ES8316_CLKMGR_ADC_ANALOG_MASK   (0X1<<1)
+#define ES8316_CLKMGR_ADC_ANALOG_EN     (0X1<<1)
+#define ES8316_CLKMGR_ADC_ANALOG_DIS    (0X0<<1)
+#define ES8316_CLKMGR_DAC_ANALOG_MASK   (0X1<<0)
+#define ES8316_CLKMGR_DAC_ANALOG_EN     (0X1<<0)
+#define ES8316_CLKMGR_DAC_ANALOG_DIS    (0X0<<0)
+
+/* REGISTER 0X0A */
+#define ES8316_ADCWL_MASK       (0x7 << 2)
+#define ES8316_ADCWL_32         (0x4 << 2)
+#define ES8316_ADCWL_24         (0x0 << 2)
+#define ES8316_ADCWL_20         (0x1 << 2)
+#define ES8316_ADCWL_18         (0x2 << 2)
+#define ES8316_ADCWL_16         (0x3 << 2)
+#define ES8316_ADCFMT_MASK      (0x3 << 0)
+#define ES8316_ADCFMT_I2S       (0x0 << 0)
+#define ES8316_ADCWL_LEFT       (0x1 << 0)
+#define ES8316_ADCWL_RIGHT      (0x2 << 0)
+#define ES8316_ADCWL_PCM        (0x3 << 0)
+
+/* REGISTER 0X0B */
+#define ES8316_DACWL_MASK       (0x7 << 2)
+#define ES8316_DACWL_32         (0x4 << 2)
+#define ES8316_DACWL_24         (0x0 << 2)
+#define ES8316_DACWL_20         (0x1 << 2)
+#define ES8316_DACWL_18         (0x2 << 2)
+#define ES8316_DACWL_16         (0x3 << 2)
+#define ES8316_DACFMT_MASK      (0x3 << 0)
+#define ES8316_DACFMT_I2S       (0x0 << 0)
+#define ES8316_DACWL_LEFT       (0x1 << 0)
+#define ES8316_DACWL_RIGHT      (0x2 << 0)
+#define ES8316_DACWL_PCM        (0x3 << 0)
 
 #endif

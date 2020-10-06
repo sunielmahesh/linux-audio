@@ -26,6 +26,8 @@
 #include <sound/jack.h>
 #include "es8316.h"
 
+struct snd_soc_component *es8316_component;
+
 /* In slave mode at single speed, the codec is documented as accepting 5
  * MCLK/LRCK ratios, but we also add ratio 400, which is commonly used on
  * Intel Cherry Trail platforms (19.2MHz MCLK, 48kHz LRCK).
@@ -45,6 +47,10 @@ struct es8316_priv {
 	unsigned int sysclk;
 	unsigned int allowed_rates[NR_SUPPORTED_MCLK_LRCK_RATIOS];
 	struct snd_pcm_hw_constraint_list sysclk_constraints;
+	bool muted;
+	bool hp_inserted;
+	bool spk_active_level;
+	int pwr_count;
 };
 
 /*
@@ -359,88 +365,177 @@ static const struct snd_soc_dapm_route es8316_dapm_routes[] = {
 	{"HPOR", NULL, "Headphone Out"},
 };
 
+/*
+ * es8316_reset
+ * write value 0xff to reg0x00, the chip will be in reset mode
+ * then, writer 0x03 to reg0x00, unreset the chip
+ */
+static int es8316_reset(struct snd_soc_component *component)
+{
+	dev_info(component->dev, "in es8316_reset\n");
+	snd_soc_component_write(component, ES8316_RESET, 0x3f);
+        usleep_range(5000, 5500);
+        return snd_soc_component_write(component, ES8316_RESET, 0x03);
+}
+/*
+static void es8316_enable_spk(struct es8316_priv *es8316, bool enable)
+{
+        bool level;
+
+        level = enable ? es8316->spk_active_level : !es8316->spk_active_level;
+
+        if (INVALID_GPIO != es8316->spk_ctl_gpio) {
+                gpio_set_value(es8316->spk_ctl_gpio, level);
+        }
+}*/
+
+/* The set of rates we can generate from the above for each SYSCLK */
+
+static unsigned int rates_12288[] = {
+        8000, 12000, 16000, 24000, 24000, 32000, 48000, 96000,
+};
+
+static struct snd_pcm_hw_constraint_list constraints_12288 = {
+        .count  = ARRAY_SIZE(rates_12288),
+        .list   = rates_12288,
+};
+
+static unsigned int rates_112896[] = {
+        8000, 11025, 22050, 44100,
+};
+
+static struct snd_pcm_hw_constraint_list constraints_112896 = {
+        .count  = ARRAY_SIZE(rates_112896),
+        .list   = rates_112896,
+};
+
+static unsigned int rates_12[] = {
+        8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000,
+        48000, 88235, 96000,
+};
+
+static struct snd_pcm_hw_constraint_list constraints_12 = {
+        .count  = ARRAY_SIZE(rates_12),
+        .list   = rates_12,
+};
+
+
 static int es8316_set_dai_sysclk(struct snd_soc_dai *codec_dai,
 				 int clk_id, unsigned int freq, int dir)
 {
 	struct snd_soc_component *component = codec_dai->component;
 	struct es8316_priv *es8316 = snd_soc_component_get_drvdata(component);
-	int i, ret;
-	int count = 0;
 
-	es8316->sysclk = freq;
-
-	if (freq == 0)
-		return 0;
-
-	if (es8316->mclk) {
-		ret = clk_set_rate(es8316->mclk, freq);
-		if (ret)
-			return ret;
-	}
-
-	/* Limit supported sample rates to ones that can be autodetected
-	 * by the codec running in slave mode.
-	 */
-	for (i = 0; i < NR_SUPPORTED_MCLK_LRCK_RATIOS; i++) {
-		const unsigned int ratio = supported_mclk_lrck_ratios[i];
-
-		if (freq % ratio == 0)
-			es8316->allowed_rates[count++] = freq / ratio;
-	}
-
-	es8316->sysclk_constraints.list = es8316->allowed_rates;
-	es8316->sysclk_constraints.count = count;
-
-	return 0;
+	dev_info(component->dev, "in es8316_set_dai_sysclk\n");
+	switch (freq) {
+        case 11289600:
+        case 18432000:
+        case 22579200:
+        case 36864000:
+                es8316->sysclk_constraints = constraints_112896;
+                es8316->sysclk = freq;
+                return 0;
+	case 12288000:
+        case 19200000:
+        case 16934400:
+        case 24576000:
+        case 33868800:
+                es8316->sysclk_constraints = constraints_12288;
+                es8316->sysclk = freq;
+                return 0;
+        case 12000000:
+        case 24000000:
+                es8316->sysclk_constraints = constraints_12;
+                es8316->sysclk = freq;
+                return 0;
+        }
+        return -EINVAL;
 }
 
 static int es8316_set_dai_fmt(struct snd_soc_dai *codec_dai,
 			      unsigned int fmt)
 {
 	struct snd_soc_component *component = codec_dai->component;
-	u8 serdata1 = 0;
-	u8 serdata2 = 0;
-	u8 clksw;
-	u8 mask;
+	unsigned int iface = 0;
+        unsigned int adciface = 0;
+        unsigned int daciface = 0;
 
-	if ((fmt & SND_SOC_DAIFMT_MASTER_MASK) != SND_SOC_DAIFMT_CBS_CFS) {
-		dev_err(component->dev, "Codec driver only supports slave mode\n");
-		return -EINVAL;
-	}
+	dev_info(component->dev, "in es8316_set_dai_fmt\n");
+        snd_soc_component_read(component, ES8316_IFACE, &iface);
+        snd_soc_component_read(component, ES8316_ADC_IFACE, &adciface);
+        snd_soc_component_read(component, ES8316_DAC_IFACE, &daciface);
 
-	if ((fmt & SND_SOC_DAIFMT_FORMAT_MASK) != SND_SOC_DAIFMT_I2S) {
-		dev_err(component->dev, "Codec driver only supports I2S format\n");
-		return -EINVAL;
-	}
+	/* set master/slave audio interface */
+        switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
+        case SND_SOC_DAIFMT_CBM_CFM:
+                iface |= 0x80;
+                break;
+        case SND_SOC_DAIFMT_CBS_CFS:
+                iface &= 0x7F;
+                break;
+        default:
+                return -EINVAL;
+        }
 
-	/* Clock inversion */
-	switch (fmt & SND_SOC_DAIFMT_INV_MASK) {
-	case SND_SOC_DAIFMT_NB_NF:
-		break;
-	case SND_SOC_DAIFMT_IB_IF:
-		serdata1 |= ES8316_SERDATA1_BCLK_INV;
-		serdata2 |= ES8316_SERDATA2_ADCLRP;
-		break;
-	case SND_SOC_DAIFMT_IB_NF:
-		serdata1 |= ES8316_SERDATA1_BCLK_INV;
-		break;
-	case SND_SOC_DAIFMT_NB_IF:
-		serdata2 |= ES8316_SERDATA2_ADCLRP;
-		break;
-	default:
-		return -EINVAL;
-	}
+	/* interface format */
 
-	mask = ES8316_SERDATA1_MASTER | ES8316_SERDATA1_BCLK_INV;
-	snd_soc_component_update_bits(component, ES8316_SERDATA1, mask, serdata1);
+        switch (fmt & SND_SOC_DAIFMT_FORMAT_MASK) {
+        case SND_SOC_DAIFMT_I2S:
+                adciface &= 0xFC;
+                daciface &= 0xFC;
+                break;
+        case SND_SOC_DAIFMT_RIGHT_J:
+                return -EINVAL;
+        case SND_SOC_DAIFMT_LEFT_J:
+                adciface &= 0xFC;
+                daciface &= 0xFC;
+                adciface |= 0x01;
+                daciface |= 0x01;
+                break;
+        case SND_SOC_DAIFMT_DSP_A:
+                adciface &= 0xDC;
+                daciface &= 0xDC;
+                adciface |= 0x03;
+                daciface |= 0x03;
+                break;
+        case SND_SOC_DAIFMT_DSP_B:
+                adciface &= 0xDC;
+                daciface &= 0xDC;
+                adciface |= 0x23;
+                daciface |= 0x23;
+                break;
+        default:
+                return -EINVAL;
+        }
 
-	mask = ES8316_SERDATA2_FMT_MASK | ES8316_SERDATA2_ADCLRP;
-	snd_soc_component_update_bits(component, ES8316_SERDATA_ADC, mask, serdata2);
-	snd_soc_component_update_bits(component, ES8316_SERDATA_DAC, mask, serdata2);
-
-	/* Enable BCLK and MCLK inputs in slave mode */
-	clksw = ES8316_CLKMGR_CLKSW_MCLK_ON | ES8316_CLKMGR_CLKSW_BCLK_ON;
-	snd_soc_component_update_bits(component, ES8316_CLKMGR_CLKSW, clksw, clksw);
+	/* clock inversion */
+        switch (fmt & SND_SOC_DAIFMT_INV_MASK) {
+        case SND_SOC_DAIFMT_NB_NF:
+                iface    &= 0xDF;
+                adciface &= 0xDF;
+                daciface &= 0xDF;
+                break;
+        case SND_SOC_DAIFMT_IB_IF:
+                iface    |= 0x20;
+                adciface |= 0x20;
+                daciface |= 0x20;
+                break;
+        case SND_SOC_DAIFMT_IB_NF:
+                iface    |= 0x20;
+                adciface &= 0xDF;
+                daciface &= 0xDF;
+                break;
+        case SND_SOC_DAIFMT_NB_IF:
+                iface    &= 0xDF;
+                adciface |= 0x20;
+                daciface |= 0x20;
+                break;
+        default:
+                return -EINVAL;
+        }
+	snd_soc_component_write(component, ES8316_IFACE, iface);
+        snd_soc_component_write(component, ES8316_ADC_IFACE, adciface);
+        snd_soc_component_write(component, ES8316_DAC_IFACE, daciface);
 
 	return 0;
 }
@@ -450,18 +545,42 @@ static int es8316_pcm_startup(struct snd_pcm_substream *substream,
 {
 	struct snd_soc_component *component = dai->component;
 	struct es8316_priv *es8316 = snd_soc_component_get_drvdata(component);
+	bool playback = (substream->stream == SNDRV_PCM_STREAM_PLAYBACK);
 
-	if (es8316->sysclk == 0) {
-		dev_err(component->dev, "No sysclk provided\n");
-		return -EINVAL;
-	}
+	dev_info(component->dev, "in es8316_pcm_startup\n");
+	snd_soc_component_write(component, ES8316_RESET, 0xC0);
+	snd_soc_component_write(component, ES8316_SYS_PDN, 0x00);
 
-	/* The set of sample rates that can be supported depends on the
-	 * MCLK supplied to the CODEC.
-	 */
-	snd_pcm_hw_constraint_list(substream->runtime, 0,
-				   SNDRV_PCM_HW_PARAM_RATE,
-				   &es8316->sysclk_constraints);
+	/* es8316: both playback and capture need dac mclk */
+        snd_soc_component_update_bits(component, ES8316_CLKMGR_CLKSW,
+			ES8316_CLKMGR_MCLK_DIV_MASK | ES8316_CLKMGR_DAC_MCLK_MASK,
+			ES8316_CLKMGR_MCLK_DIV_NML | ES8316_CLKMGR_DAC_MCLK_EN);
+	es8316->pwr_count++;
+
+	if (playback) {
+                snd_soc_component_write(component, ES8316_SYS_LP1, 0x3F);
+                snd_soc_component_write(component, ES8316_SYS_LP2, 0x1F);
+                snd_soc_component_write(component, ES8316_HPMIX_SWITCH, 0x88);
+                snd_soc_component_write(component, ES8316_HPMIX_PDN, 0x00);
+                snd_soc_component_write(component, ES8316_HPMIX_VOL, 0xBB);
+                snd_soc_component_write(component, ES8316_CPHP_PDN2, 0x10);
+                snd_soc_component_write(component, ES8316_CPHP_LDOCTL, 0x30);
+                snd_soc_component_write(component, ES8316_CPHP_PDN1, 0x02);
+                snd_soc_component_write(component, ES8316_DAC_PDN, 0x00);
+                snd_soc_component_write(component, ES8316_CPHP_OUTEN, 0x66);
+
+                snd_soc_component_update_bits(component, ES8316_CLKMGR_CLKSW,
+					ES8316_CLKMGR_DAC_MCLK_MASK | ES8316_CLKMGR_DAC_ANALOG_MASK,
+					ES8316_CLKMGR_DAC_MCLK_EN | ES8316_CLKMGR_DAC_ANALOG_EN);
+                msleep(50);
+        } else {
+                snd_soc_component_update_bits(component, ES8316_GPIO_SEL, 0x02, 0x2);
+
+                snd_soc_component_update_bits(component, ES8316_ADC_PDN_LINSEL, 0xC0, 0x20);
+                snd_soc_component_update_bits(component, ES8316_CLKMGR_CLKSW,
+					ES8316_CLKMGR_ADC_MCLK_MASK | ES8316_CLKMGR_ADC_ANALOG_MASK,
+					ES8316_CLKMGR_ADC_MCLK_EN | ES8316_CLKMGR_ADC_ANALOG_EN);
+        }
 
 	return 0;
 }
@@ -471,42 +590,107 @@ static int es8316_pcm_hw_params(struct snd_pcm_substream *substream,
 				struct snd_soc_dai *dai)
 {
 	struct snd_soc_component *component = dai->component;
-	struct es8316_priv *es8316 = snd_soc_component_get_drvdata(component);
-	u8 wordlen = 0;
+//	struct es8316_priv *es8316 = snd_soc_component_get_drvdata(component);
+//	u8 wordlen = 0;
+	int val = 0;
 
-	if (!es8316->sysclk) {
-		dev_err(component->dev, "No MCLK configured\n");
-		return -EINVAL;
-	}
-
+	dev_info(component->dev, "in es8316_pcm_hw_params\n");
 	switch (params_format(params)) {
-	case SNDRV_PCM_FORMAT_S16_LE:
-		wordlen = ES8316_SERDATA2_LEN_16;
-		break;
-	case SNDRV_PCM_FORMAT_S20_3LE:
-		wordlen = ES8316_SERDATA2_LEN_20;
-		break;
-	case SNDRV_PCM_FORMAT_S24_LE:
-		wordlen = ES8316_SERDATA2_LEN_24;
-		break;
-	case SNDRV_PCM_FORMAT_S32_LE:
-		wordlen = ES8316_SERDATA2_LEN_32;
-		break;
-	default:
-		return -EINVAL;
-	}
+        case SNDRV_PCM_FORMAT_S16_LE:
+                val = ES8316_DACWL_16;
+                break;
+        case SNDRV_PCM_FORMAT_S20_3LE:
+                val = ES8316_DACWL_20;
+                break;
+        case SNDRV_PCM_FORMAT_S24_LE:
+                val = ES8316_DACWL_24;
+                break;
+        case SNDRV_PCM_FORMAT_S32_LE:
+                val = ES8316_DACWL_32;
+                break;
+        default:
+                val = ES8316_DACWL_16;
+                break;
+        }
 
-	snd_soc_component_update_bits(component, ES8316_SERDATA_DAC,
-			    ES8316_SERDATA2_LEN_MASK, wordlen);
-	snd_soc_component_update_bits(component, ES8316_SERDATA_ADC,
-			    ES8316_SERDATA2_LEN_MASK, wordlen);
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		snd_soc_component_update_bits(component, ES8316_SERDATA_DAC,
+						ES8316_SERDATA2_LEN_MASK, val);
+	else
+		snd_soc_component_update_bits(component, ES8316_SERDATA_ADC,
+					ES8316_SERDATA2_LEN_MASK, val);
 	return 0;
 }
 
 static int es8316_mute(struct snd_soc_dai *dai, int mute)
 {
+	struct snd_soc_component *component = dai->component;
+        struct es8316_priv *es8316 = snd_soc_component_get_drvdata(component);
+
+	dev_info(component->dev, "in es8316_mute\n");
+	es8316->muted = mute;
+	if (mute) {
+//                es8316_enable_spk(es8316, false);
+                msleep(100);
+                snd_soc_component_write(component, ES8316_DAC_SET1, 0x20);
+        } else if (dai->playback_active) {
+                snd_soc_component_write(component, ES8316_DAC_SET1, 0x00);
+                msleep(130);
+//                if (!es8316->hp_inserted)
+  //                      es8316_enable_spk(es8316, true);
+        }
+
 	snd_soc_component_update_bits(dai->component, ES8316_DAC_SET1, 0x20,
 			    mute ? 0x20 : 0);
+	return 0;
+}
+
+static int es8316_set_bias_level(struct snd_soc_component *component,
+					enum snd_soc_bias_level level)
+{
+	struct es8316_priv *es8316 = snd_soc_component_get_drvdata(component);
+	int ret;
+
+	dev_info(component->dev, "in es8316_set_bias_level\n");
+	switch (level) {
+        case SND_SOC_BIAS_ON:
+                break;
+
+        case SND_SOC_BIAS_PREPARE:
+                if (IS_ERR(es8316->mclk))
+                        break;
+
+                if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_ON) {
+                        clk_disable_unprepare(es8316->mclk);
+                } else {
+                        ret = clk_prepare_enable(es8316->mclk);
+                        if (ret)
+                                return ret;
+                }
+                break;
+
+        case SND_SOC_BIAS_STANDBY:
+                break;
+
+        case SND_SOC_BIAS_OFF:
+		 snd_soc_component_write(component, ES8316_CPHP_OUTEN, 0x00);
+                 snd_soc_component_write(component, ES8316_DAC_PDN, 0x11);
+                 snd_soc_component_write(component, ES8316_CPHP_LDOCTL, 0x03);
+                 snd_soc_component_write(component, ES8316_CPHP_PDN2, 0x22);
+                 snd_soc_component_write(component, ES8316_CPHP_PDN1, 0x06);
+                 snd_soc_component_write(component, ES8316_HPMIX_SWITCH, 0x00);
+                 snd_soc_component_write(component, ES8316_HPMIX_PDN, 0x33);
+                 snd_soc_component_write(component, ES8316_HPMIX_VOL, 0x00);
+                 snd_soc_component_write(component, ES8316_ADC_PDN_LINSEL, 0xc0);	
+                 
+		if (!es8316->hp_inserted)
+			snd_soc_component_write(component, ES8316_SYS_PDN, 0x3F);
+
+		snd_soc_component_write(component, ES8316_SYS_LP1, 0x3F);
+		snd_soc_component_write(component, ES8316_SYS_LP2, 0x1F);
+		snd_soc_component_write(component, ES8316_RESET, 0x00);	
+		break;
+	}
 	return 0;
 }
 
@@ -546,6 +730,7 @@ static void es8316_enable_micbias_for_mic_gnd_short_detect(
 {
 	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
 
+	dev_info(component->dev, "in es8316_enable_micbias_for_mic_gnd_short_detect\n");
 	snd_soc_dapm_mutex_lock(dapm);
 	snd_soc_dapm_force_enable_pin_unlocked(dapm, "Bias");
 	snd_soc_dapm_force_enable_pin_unlocked(dapm, "Analog power");
@@ -567,6 +752,78 @@ static void es8316_disable_micbias_for_mic_gnd_short_detect(
 	snd_soc_dapm_disable_pin_unlocked(dapm, "Bias");
 	snd_soc_dapm_sync_unlocked(dapm);
 	snd_soc_dapm_mutex_unlock(dapm);
+}
+
+static int es8316_init_regs(struct snd_soc_component *component)
+{
+	dev_info(component->dev, "in es8316_init_regs\n");
+//	snd_soc_write(codec, ES8316_RESET_REG00, 0x3f);
+	snd_soc_component_write(component, ES8316_RESET, 0x3f);
+        usleep_range(5000, 5500);
+
+//	snd_soc_write(codec, ES8316_RESET_REG00, 0x00);
+	snd_soc_component_write(component, ES8316_RESET, 0x00);
+//      snd_soc_write(codec, ES8316_SYS_VMIDSEL_REG0C, 0xFF);
+	snd_soc_component_write(component, ES8316_SYS_VMIDSEL, 0xFF);
+        msleep(30);
+
+	snd_soc_component_write(component, ES8316_CLKMGR_CLKSEL, 0x08);
+        snd_soc_component_write(component, ES8316_CLKMGR_ADCOSR, 0x20);
+        snd_soc_component_write(component, ES8316_CLKMGR_ADCDIV1, 0x11);
+        snd_soc_component_write(component, ES8316_CLKMGR_ADCDIV2, 0x00);
+        snd_soc_component_write(component, ES8316_CLKMGR_DACDIV1, 0x11);
+        snd_soc_component_write(component, ES8316_CLKMGR_DACDIV2, 0x00);
+        snd_soc_component_write(component, ES8316_CLKMGR_CPDIV, 0x00);
+        snd_soc_component_write(component, ES8316_SERDATA1, 0x04);
+        snd_soc_component_write(component, ES8316_CLKMGR_CLKSW, 0x7F);
+        snd_soc_component_write(component, ES8316_CAL_TYPE, 0x0F);
+        snd_soc_component_write(component, ES8316_CAL_HPLIV, 0x90);
+        snd_soc_component_write(component, ES8316_CAL_HPRIV, 0x90);
+        snd_soc_component_write(component, ES8316_ADC_VOLUME, 0x00);
+        snd_soc_component_write(component, ES8316_ADC_PDN_LINSEL, 0xc0);
+        snd_soc_component_write(component, ES8316_ADC_D2SEPGA, 0x00);
+        snd_soc_component_write(component, ES8316_ADC_DMIC, 0x08);
+        snd_soc_component_write(component, ES8316_DAC_SET2, 0x20);
+        snd_soc_component_write(component, ES8316_DAC_SET3, 0x00);
+        snd_soc_component_write(component, ES8316_DAC_VOLL, 0x00);
+        snd_soc_component_write(component, ES8316_DAC_VOLR, 0x00);
+        snd_soc_component_write(component, ES8316_SERDATA_ADC, 0x00);
+        snd_soc_component_write(component, ES8316_SERDATA_DAC, 0x00);
+        snd_soc_component_write(component, ES8316_SYS_VMIDLOW, 0x11);
+        snd_soc_component_write(component, ES8316_SYS_VSEL, 0xFC);
+        snd_soc_component_write(component, ES8316_SYS_REF, 0x28);
+        snd_soc_component_write(component, ES8316_SYS_LP1, 0x04);
+        snd_soc_component_write(component, ES8316_SYS_LP2, 0x0C);
+        snd_soc_component_write(component, ES8316_DAC_PDN, 0x11);
+        snd_soc_component_write(component, ES8316_HPMIX_SEL, 0x00);
+        snd_soc_component_write(component, ES8316_HPMIX_SWITCH, 0x88);
+        snd_soc_component_write(component, ES8316_HPMIX_PDN, 0x00);
+        snd_soc_component_write(component, ES8316_HPMIX_VOL, 0xBB);
+        snd_soc_component_write(component, ES8316_CPHP_PDN2, 0x10);
+        snd_soc_component_write(component, ES8316_CPHP_LDOCTL, 0x30);
+        snd_soc_component_write(component, ES8316_CPHP_PDN1, 0x02);
+        snd_soc_component_write(component, ES8316_CPHP_ICAL_VOL, 0x00);
+        snd_soc_component_write(component, ES8316_GPIO_SEL, 0x00);
+        snd_soc_component_write(component, ES8316_GPIO_DEBOUNCE, 0x02);
+        snd_soc_component_write(component, ES8316_TESTMODE, 0xA0);
+        snd_soc_component_write(component, ES8316_TEST1, 0x00);
+        snd_soc_component_write(component, ES8316_TEST2, 0x00);
+        snd_soc_component_write(component, ES8316_SYS_PDN, 0x00);
+        snd_soc_component_write(component, ES8316_RESET, 0xC0);
+        msleep(50);
+
+	snd_soc_component_write(component, ES8316_ADC_PGAGAIN, 0x60);
+        snd_soc_component_write(component, ES8316_ADC_D2SEPGA, 0x01);
+
+        /* adc ds mode, HPF enable */
+        snd_soc_component_write(component, ES8316_ADC_DMIC, 0x08);
+        snd_soc_component_write(component, ES8316_ADC_ALC1, 0xcd);
+        snd_soc_component_write(component, ES8316_ADC_ALC2, 0x08);
+        snd_soc_component_write(component, ES8316_ADC_ALC3, 0xa0);
+        snd_soc_component_write(component, ES8316_ADC_ALC4, 0x05);
+        snd_soc_component_write(component, ES8316_ADC_ALC5, 0x06);
+        snd_soc_component_write(component, ES8316_ADC_ALC_NG, 0x61);
+        return 0;
 }
 
 static irqreturn_t es8316_irq(int irq, void *data)
@@ -636,11 +893,41 @@ out:
 	return IRQ_HANDLED;
 }
 
+/*
+ * Call from rk_headset_irq_hook_adc.c
+ *
+ * Enable micbias for HOOK detection and disable external Amplifier
+ * when jack insertion.
+ */
+int es8316_headset_detect(int jack_insert)
+{
+        struct es8316_priv *es8316;
+
+        if (!es8316_component)
+                return -1;
+
+        es8316 = snd_soc_component_get_drvdata(es8316_component);;
+
+        dev_info(es8316_component->dev, "in es8316_headset_detect\n");
+        es8316->hp_inserted = jack_insert;
+
+        /*enable micbias and disable PA*/
+        if (jack_insert) {
+                snd_soc_component_update_bits(es8316_component,
+						ES8316_SYS_PDN, 0x3f, 0);
+//                es8316_enable_spk(es8316, false);
+        }
+
+        return 0;
+}
+EXPORT_SYMBOL(es8316_headset_detect);
+
 static void es8316_enable_jack_detect(struct snd_soc_component *component,
 				      struct snd_soc_jack *jack)
 {
 	struct es8316_priv *es8316 = snd_soc_component_get_drvdata(component);
 
+	dev_info(component->dev, "in es8316_enable_jack_detect\n");
 	mutex_lock(&es8316->lock);
 
 	es8316->jack = jack;
@@ -683,6 +970,7 @@ static void es8316_disable_jack_detect(struct snd_soc_component *component)
 static int es8316_set_jack(struct snd_soc_component *component,
 			   struct snd_soc_jack *jack, void *data)
 {
+	dev_info(component->dev, "in es8316_set_jack\n");
 	if (jack)
 		es8316_enable_jack_detect(component, jack);
 	else
@@ -695,8 +983,11 @@ static int es8316_probe(struct snd_soc_component *component)
 {
 	struct es8316_priv *es8316 = snd_soc_component_get_drvdata(component);
 	int ret;
+	unsigned int val;
 
+	dev_info(component->dev, "in es8316_probe\n");
 	es8316->component = component;
+	es8316_component = component;
 
 	es8316->mclk = devm_clk_get(component->dev, "mclk");
 	if (PTR_ERR(es8316->mclk) == -EPROBE_DEFER)
@@ -714,24 +1005,54 @@ static int es8316_probe(struct snd_soc_component *component)
 		}
 	}
 
+//	ret = snd_soc_read(codec, ES8316_CLKMGR_ADCDIV2);
+	ret = snd_soc_component_read(component, ES8316_CLKMGR_ADCDIV2, &val);
+	if (!val) {
+		es8316_reset(component); /* UPDATED BY DAVID,15-3-5 */
+		ret = snd_soc_component_read(component, ES8316_CLKMGR_ADCDIV2, &val);
+
+		if (!val) {
+			es8316_init_regs(component);
+			ret = snd_soc_component_write(component, ES8316_GPIO_SEL, 0x00);
+			/* max debounce time, enable interrupt, low active */
+                        snd_soc_component_write(component, ES8316_GPIO_DEBOUNCE, 0xf3);
+
+			/* es8316_set_bias_level(codec, SND_SOC_BIAS_OFF); */
+                        snd_soc_component_write(component, ES8316_CPHP_OUTEN, 0x00);
+                        snd_soc_component_write(component, ES8316_DAC_PDN, 0x11);
+                        snd_soc_component_write(component, ES8316_CPHP_LDOCTL, 0x03);
+                        snd_soc_component_write(component, ES8316_CPHP_PDN2, 0x22);
+                        snd_soc_component_write(component, ES8316_CPHP_PDN1, 0x06);
+                        snd_soc_component_write(component, ES8316_HPMIX_SWITCH, 0x00);
+                        snd_soc_component_write(component, ES8316_HPMIX_PDN, 0x33);
+                        snd_soc_component_write(component, ES8316_HPMIX_VOL, 0x00);
+                        if (!es8316->hp_inserted)
+                                snd_soc_component_write(component, ES8316_SYS_PDN, 0x3F);
+                        snd_soc_component_write(component, ES8316_SYS_LP1, 0xFF);
+                        snd_soc_component_write(component, ES8316_SYS_LP2, 0xFF);
+                        snd_soc_component_write(component, ES8316_CLKMGR_CLKSW, 0xF3);
+                        snd_soc_component_write(component, ES8316_ADC_PDN_LINSEL, 0xc0);
+		}
+	}
+
 	/* Reset codec and enable current state machine */
-	snd_soc_component_write(component, ES8316_RESET, 0x3f);
+/*	snd_soc_component_write(component, ES8316_RESET, 0x3f);
 	usleep_range(5000, 5500);
 	snd_soc_component_write(component, ES8316_RESET, ES8316_RESET_CSM_ON);
-	msleep(30);
+	msleep(30);*/
 
 	/*
 	 * Documentation is unclear, but this value from the vendor driver is
 	 * needed otherwise audio output is silent.
 	 */
-	snd_soc_component_write(component, ES8316_SYS_VMIDSEL, 0xff);
+//	snd_soc_component_write(component, ES8316_SYS_VMIDSEL, 0xff);
 
 	/*
 	 * Documentation for this register is unclear and incomplete,
 	 * but here is a vendor-provided value that improves volume
 	 * and quality for Intel CHT platforms.
 	 */
-	snd_soc_component_write(component, ES8316_CLKMGR_ADCOSR, 0x32);
+//	snd_soc_component_write(component, ES8316_CLKMGR_ADCOSR, 0x32);
 
 	return 0;
 }
@@ -749,6 +1070,7 @@ static const struct snd_soc_component_driver soc_component_dev_es8316 = {
 	.remove			= es8316_remove,
 	.set_jack		= es8316_set_jack,
 	.controls		= es8316_snd_controls,
+	.set_bias_level 	= es8316_set_bias_level,
 	.num_controls		= ARRAY_SIZE(es8316_snd_controls),
 	.dapm_widgets		= es8316_dapm_widgets,
 	.num_dapm_widgets	= ARRAY_SIZE(es8316_dapm_widgets),
@@ -788,6 +1110,11 @@ static int es8316_i2c_probe(struct i2c_client *i2c_client,
 	if (es8316 == NULL)
 		return -ENOMEM;
 
+	dev_info(dev, "in es8316_i2c_probe\n");
+	es8316->pwr_count = 0;
+	es8316->hp_inserted = false;
+	es8316->muted = true;
+
 	i2c_set_clientdata(i2c_client, es8316);
 
 	es8316->regmap = devm_regmap_init_i2c(i2c_client, &es8316_regmap);
@@ -815,6 +1142,8 @@ static int es8316_i2c_probe(struct i2c_client *i2c_client,
 
 static const struct i2c_device_id es8316_i2c_id[] = {
 	{"es8316", 0 },
+	{"10ES8316:00", 0},
+        {"10ES8316", 0},
 	{}
 };
 MODULE_DEVICE_TABLE(i2c, es8316_i2c_id);
